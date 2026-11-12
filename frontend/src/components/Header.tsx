@@ -15,7 +15,7 @@ export function Header({ health, running, onHome, actions }: Props) {
         <span className="brand-mark"><Logo /></span>
         <span>
           <span className="brand-name">Code Review Agent</span>
-          <span className="brand-sub">Claude-powered review for diffs and pull requests</span>
+          <span className="brand-sub">AI review for diffs and pull requests</span>
         </span>
       </button>
       <nav className="topbar-actions" aria-label="Primary">

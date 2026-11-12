@@ -1,0 +1,13 @@
+.git
+**/node_modules
+**/bin
+**/obj
+**/TestResults
+backend/src/CodeReviewAgent.Api/wwwroot
+frontend/dist
+*.db
+*.db-shm
+*.db-wal
+.env
+.env.*
+.DS_Store

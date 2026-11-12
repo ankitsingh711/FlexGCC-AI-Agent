@@ -25,6 +25,7 @@ To use a different model, set `Agent:Provider` (and optionally `Agent:Model`) in
 - **UI:** paste a diff (or load one of the four samples in `samples/`) or enter a PR URL. The agent's tool calls stream live, and past runs are kept in History.
 - **CLI / CI:** `git diff main | dotnet run --project backend/src/CodeReviewAgent.Cli -- --diff - --fail-on high`. It exits with code 1 if any finding is at or above the threshold, and `--json` prints machine-readable output. It reads the same key variables, plus `REVIEW_PROVIDER` and `REVIEW_MODEL`.
 - **Tests:** `cd backend && dotnet test` runs 80 tests offline. The one live GitHub test does nothing unless `RUN_GITHUB_IT=1` is set.
+- **Deploy:** the root `Dockerfile` builds the UI and API into one image, and `render.yaml` deploys it on Render's free tier (New → Blueprint → this repo, then enter `GEMINI_API_KEY`).
 - **Dev mode:** start the API with `dotnet run --project backend/src/CodeReviewAgent.Api`, then run `npm run dev` in `frontend/` (Vite proxies `/api`).
 
 ## How it's built
