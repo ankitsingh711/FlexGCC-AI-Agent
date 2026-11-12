@@ -10,7 +10,8 @@ public sealed record ProviderSelection(
     string Model,
     string ApiKeyEnvVar,
     string? ApiKey,
-    string? ReasoningEffort)
+    string? ReasoningEffort,
+    IReadOnlyList<string>? FallbackModels = null)
 {
     public bool IsConfigured => !string.IsNullOrWhiteSpace(ApiKey);
 }
@@ -21,11 +22,13 @@ public sealed record ProviderSelection(
 /// </summary>
 public static class ProviderPresets
 {
-    private sealed record Preset(string BaseUrl, string DefaultModel, string KeyEnvVar, bool SendsReasoningEffort);
+    private sealed record Preset(string BaseUrl, string DefaultModel, string KeyEnvVar, bool SendsReasoningEffort, string[]? DefaultFallbacks = null);
 
     private static readonly Dictionary<string, Preset> OpenAiCompatible = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["gemini"] = new("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-3.8-flash", "GEMINI_API_KEY", true),
+        ["gemini"] = new("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini-3.8-flash", "GEMINI_API_KEY", true,
+            // Free-tier capacity is per model, and a busy model answers 503 "high demand" for minutes at a time.
+            ["gemini-3.6-flash", "gemini-3.5-flash-lite"]),
         ["groq"] = new("https://api.groq.com/openai/v1/", "openai/gpt-oss-120b", "GROQ_API_KEY", true),
         ["openrouter"] = new("https://openrouter.ai/api/v1/", string.Empty, "OPENROUTER_API_KEY", false),
         ["openai-compatible"] = new(string.Empty, string.Empty, "LLM_API_KEY", false),
@@ -34,7 +37,7 @@ public static class ProviderPresets
     public static IReadOnlyCollection<string> Names { get; } = ["gemini", "groq", "openrouter", "openai-compatible", "anthropic"];
 
     /// <param name="options">Agent options; <see cref="AgentOptions.Provider"/>, <see cref="AgentOptions.Model"/>,
-    /// <see cref="AgentOptions.BaseUrl"/> and <see cref="AgentOptions.Effort"/> are read.</param>
+    /// <see cref="AgentOptions.BaseUrl"/>, <see cref="AgentOptions.Effort"/> and <see cref="AgentOptions.FallbackModels"/> are read.</param>
     /// <param name="getSetting">Reads an environment variable or configuration value by name.</param>
     public static ProviderSelection Resolve(AgentOptions options, Func<string, string?> getSetting)
     {
@@ -69,6 +72,12 @@ public static class ProviderPresets
             ? options.Effort.ToLowerInvariant() switch { "low" => "low", "medium" => "medium", _ => "high" }
             : null;
 
+        var fallbacks = (options.FallbackModels ?? preset.DefaultFallbacks ?? [])
+            .Select(m => m.Trim())
+            .Where(m => m.Length > 0 && m != resolvedModel)
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
         return new ProviderSelection(
             provider,
             false,
@@ -76,6 +85,7 @@ public static class ProviderPresets
             resolvedModel,
             preset.KeyEnvVar,
             getSetting(preset.KeyEnvVar),
-            effort);
+            effort,
+            fallbacks);
     }
 }

@@ -59,6 +59,10 @@ public sealed class CodeReviewAgent(IChatModel model, AgentOptions options, ILog
                 var response = await model.CompleteAsync(Prompts.System, specs, history, ct);
                 usage = usage.Add(response.Usage);
                 modelUsed = response.Model;
+                if (response.FallbackNote is { } note)
+                {
+                    await emit(new AgentEvent("status", turn, note));
+                }
 
                 if (response.Stop == TurnStop.Refusal)
                 {

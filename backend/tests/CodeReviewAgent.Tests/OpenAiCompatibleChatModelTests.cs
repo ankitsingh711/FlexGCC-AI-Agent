@@ -160,6 +160,65 @@ public class OpenAiCompatibleChatModelTests
         Assert.Contains("Quota exceeded", ex.Message);
     }
 
+    private static OpenAiCompatibleChatModel WithFallbacks(FakeHandler handler, List<TimeSpan> delays, Func<DateTimeOffset>? clock = null) =>
+        new(new HttpClient(handler),
+            new OpenAiCompatibleSettings("gemini", new Uri("https://example.test/"), "k", "primary", 4000, null, FallbackModels: ["fallback-1", "fallback-2"]),
+            NullLogger<OpenAiCompatibleChatModel>.Instance)
+        {
+            Delay = (d, _) => { delays.Add(d); return Task.CompletedTask; },
+            Clock = clock ?? (() => DateTimeOffset.UtcNow),
+        };
+
+    private static string ModelOf(string body) => JsonNode.Parse(body)!["model"]!.GetValue<string>();
+
+    private static HttpResponseMessage Overloaded() =>
+        Json("""[{"error":{"code":503,"message":"This model is currently experiencing high demand."}}]""", HttpStatusCode.ServiceUnavailable);
+
+    [Fact]
+    public async Task Overloaded_model_hands_the_request_to_the_next_model_without_waiting()
+    {
+        var delays = new List<TimeSpan>();
+        var handler = new FakeHandler([Overloaded(), Json(ToolCallResponse("c", "submit_review", Fixtures.Review("approve")))]);
+        var events = new List<AgentEvent>();
+
+        await Agent(WithFallbacks(handler, delays)).ReviewAsync(new PastedDiffSource(Fixtures.CalcDiff), e => { events.Add(e); return Task.CompletedTask; });
+
+        Assert.Equal(["primary", "fallback-1"], handler.Bodies.Select(ModelOf));
+        Assert.Empty(delays);
+        Assert.Contains(events, e => e.Type == "status" && e.Message == "primary was overloaded; answered by fallback-1");
+    }
+
+    [Fact]
+    public async Task Overloaded_model_is_tried_last_until_its_cooldown_ends()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var delays = new List<TimeSpan>();
+        var ok = () => Json(ToolCallResponse("c", "submit_review", Fixtures.Review("approve")));
+        var handler = new FakeHandler([Overloaded(), ok(), ok(), ok()]);
+        var agent = Agent(WithFallbacks(handler, delays, () => now));
+
+        await agent.ReviewAsync(new PastedDiffSource(Fixtures.CalcDiff));
+        await agent.ReviewAsync(new PastedDiffSource(Fixtures.CalcDiff));          // primary is cooling down
+        now += OpenAiCompatibleChatModel.OverloadCooldown + TimeSpan.FromSeconds(1);
+        await agent.ReviewAsync(new PastedDiffSource(Fixtures.CalcDiff));          // cooldown over
+
+        Assert.Equal(["primary", "fallback-1", "fallback-1", "primary"], handler.Bodies.Select(ModelOf));
+    }
+
+    [Fact]
+    public async Task When_every_model_is_overloaded_it_backs_off_and_then_reports_the_error()
+    {
+        var delays = new List<TimeSpan>();
+        var handler = new FakeHandler(Enumerable.Range(0, 15).Select(_ => Overloaded()));
+
+        var ex = await Assert.ThrowsAsync<ModelProviderException>(() => Agent(WithFallbacks(handler, delays)).ReviewAsync(new PastedDiffSource(Fixtures.CalcDiff)));
+
+        Assert.Equal(503, ex.StatusCode);
+        Assert.Contains("high demand", ex.Message);
+        Assert.Equal(15, handler.Bodies.Count);          // 3 models x (1 try + 4 retries)
+        Assert.Equal(4, delays.Count);                   // backoff only between full passes
+    }
+
     [Fact]
     public async Task Rejected_key_is_not_retried()
     {
@@ -252,6 +311,18 @@ public class ProviderPresetsTests
         Assert.Equal("GEMINI_API_KEY", s.ApiKeyEnvVar);
         Assert.True(s.IsConfigured);
         Assert.Equal("https://generativelanguage.googleapis.com/v1beta/openai/", s.BaseUrl!.ToString());
+    }
+
+    [Fact]
+    public void Gemini_has_default_fallback_models_that_can_be_overridden_or_turned_off()
+    {
+        Assert.Equal(["gemini-3.6-flash", "gemini-3.5-flash-lite"], Resolve("gemini").FallbackModels);
+
+        var custom = ProviderPresets.Resolve(new AgentOptions { Provider = "gemini", Model = "gemini-3.6-flash", FallbackModels = ["gemini-3.6-flash", " x ", "x", ""] }, _ => null);
+        Assert.Equal(["x"], custom.FallbackModels);   // trimmed, de-duplicated, never the main model
+
+        Assert.Empty(ProviderPresets.Resolve(new AgentOptions { Provider = "gemini", FallbackModels = [] }, _ => null).FallbackModels!);
+        Assert.Empty(Resolve("groq").FallbackModels!);
     }
 
     [Fact]

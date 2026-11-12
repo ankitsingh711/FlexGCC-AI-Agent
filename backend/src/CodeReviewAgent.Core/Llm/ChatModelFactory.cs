@@ -27,7 +27,8 @@ public static class ChatModelFactory
                 selection.ApiKey ?? string.Empty,
                 selection.Model,
                 options.MaxTokensPerTurn,
-                selection.ReasoningEffort),
+                selection.ReasoningEffort,
+                FallbackModels: selection.FallbackModels),
             loggers.CreateLogger<OpenAiCompatibleChatModel>());
     }
 }

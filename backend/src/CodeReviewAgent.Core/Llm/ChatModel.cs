@@ -42,7 +42,8 @@ public sealed record ModelTurn(
     IReadOnlyList<ToolCall> ToolCalls,
     TokenUsage Usage,
     object AssistantState,
-    string? RefusalCategory = null);
+    string? RefusalCategory = null,
+    string? FallbackNote = null);
 
 public abstract record ChatMessage;
 

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Text;
@@ -18,7 +19,8 @@ public sealed record OpenAiCompatibleSettings(
     int MaxTokens,
     string? ReasoningEffort,
     int MaxRetries = 4,
-    TimeSpan? MaxRetryDelay = null);
+    TimeSpan? MaxRetryDelay = null,
+    IReadOnlyList<string>? FallbackModels = null);
 
 /// <summary>
 /// Any OpenAI-compatible Chat Completions endpoint: Google Gemini, Groq, OpenRouter, a local Ollama, etc.
@@ -30,6 +32,8 @@ public sealed record OpenAiCompatibleSettings(
 /// <item>Tool arguments arrive as a JSON string; unparseable arguments are surfaced as <see cref="ToolCall.ParseError"/>
 /// so the loop can return an error result instead of running the tool.</item>
 /// <item>Free tiers rate-limit aggressively: 429 and 5xx responses are retried with backoff, honouring Retry-After.</item>
+/// <item>A model that answers 503 (overloaded) or 429 hands the request straight to the next fallback model, and is
+/// tried last for <see cref="OverloadCooldown"/> so later turns don't wait on it again.</item>
 /// <item>The assistant message is echoed back verbatim (its tool_calls included), so provider-specific fields such as
 /// Gemini's thought signatures survive the round trip.</item>
 /// </list>
@@ -37,6 +41,11 @@ public sealed record OpenAiCompatibleSettings(
 public sealed class OpenAiCompatibleChatModel(HttpClient http, OpenAiCompatibleSettings settings, ILogger<OpenAiCompatibleChatModel> logger) : IChatModel
 {
     private static readonly JsonSerializerOptions Compact = new() { WriteIndented = false };
+
+    /// <summary>How long a model that reported overload is moved to the back of the queue.</summary>
+    public static readonly TimeSpan OverloadCooldown = TimeSpan.FromMinutes(2);
+
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _overloadedUntil = new(StringComparer.Ordinal);
 
     private JsonArray? _toolCache;
     private IReadOnlyList<ToolSpec>? _toolCacheKey;
@@ -48,11 +57,29 @@ public sealed class OpenAiCompatibleChatModel(HttpClient http, OpenAiCompatibleS
     /// <summary>Overridable for tests so retries don't actually sleep.</summary>
     public Func<TimeSpan, CancellationToken, Task> Delay { get; init; } = Task.Delay;
 
+    /// <summary>Overridable for tests of the overload cooldown.</summary>
+    public Func<DateTimeOffset> Clock { get; init; } = () => DateTimeOffset.UtcNow;
+
     public async Task<ModelTurn> CompleteAsync(string system, IReadOnlyList<ToolSpec> tools, IReadOnlyList<ChatMessage> messages, CancellationToken cancellationToken)
     {
-        var body = BuildRequest(system, tools, messages).ToJsonString(Compact);
-        using var doc = await SendWithRetryAsync(body, cancellationToken);
-        return ParseResponse(doc.RootElement);
+        var request = BuildRequest(system, tools, messages);
+        var (doc, modelUsed, skipped) = await SendWithRetryAsync(request, cancellationToken);
+        using (doc)
+        {
+            var turn = ParseResponse(doc.RootElement, modelUsed);
+            return skipped.Count == 0
+                ? turn
+                : turn with { FallbackNote = $"{string.Join(", ", skipped)} {(skipped.Count == 1 ? "was" : "were")} overloaded; answered by {modelUsed}" };
+        }
+    }
+
+    /// <summary>The configured model first, then the fallbacks; any model still cooling down after an overload goes last.</summary>
+    private List<string> ModelsInPreferenceOrder()
+    {
+        var all = new[] { settings.Model }.Concat(settings.FallbackModels ?? []).Distinct(StringComparer.Ordinal).ToList();
+        var now = Clock();
+        bool Cooling(string m) => _overloadedUntil.TryGetValue(m, out var until) && until > now;
+        return [.. all.Where(m => !Cooling(m)), .. all.Where(Cooling)];
     }
 
     public JsonObject BuildRequest(string system, IReadOnlyList<ToolSpec> tools, IReadOnlyList<ChatMessage> history)
@@ -104,7 +131,7 @@ public sealed class OpenAiCompatibleChatModel(HttpClient http, OpenAiCompatibleS
         return request;
     }
 
-    public ModelTurn ParseResponse(JsonElement root)
+    public ModelTurn ParseResponse(JsonElement root, string? requestedModel = null)
     {
         if (!root.TryGetProperty("choices", out var choices) || choices.GetArrayLength() == 0)
         {
@@ -188,7 +215,7 @@ public sealed class OpenAiCompatibleChatModel(HttpClient http, OpenAiCompatibleS
         };
 
         return new ModelTurn(
-            root.TryGetProperty("model", out var model) && model.GetString() is { Length: > 0 } ms ? ms : settings.Model,
+            root.TryGetProperty("model", out var model) && model.GetString() is { Length: > 0 } ms ? ms : requestedModel ?? settings.Model,
             stop,
             texts,
             thoughts,
@@ -235,26 +262,31 @@ public sealed class OpenAiCompatibleChatModel(HttpClient http, OpenAiCompatibleS
         return new TokenUsage(Math.Max(0, prompt - cached), completion, cached, 0);
     }
 
-    private async Task<JsonDocument> SendWithRetryAsync(string body, CancellationToken ct)
+    private async Task<(JsonDocument Doc, string Model, List<string> Skipped)> SendWithRetryAsync(JsonObject request, CancellationToken ct)
     {
         var maxDelay = settings.MaxRetryDelay ?? TimeSpan.FromSeconds(30);
-        for (var attempt = 0; ; attempt++)
+        var models = ModelsInPreferenceOrder();
+        var index = 0;
+        var skipped = new List<string>();
+        for (var attempt = 0; ; )
         {
-            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(settings.BaseUrl, "chat/completions"))
+            var modelId = models[index];
+            request["model"] = modelId;
+            using var message = new HttpRequestMessage(HttpMethod.Post, new Uri(settings.BaseUrl, "chat/completions"))
             {
-                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+                Content = new StringContent(request.ToJsonString(Compact), Encoding.UTF8, "application/json"),
             };
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.ApiKey);
+            message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", settings.ApiKey);
 
             HttpResponseMessage response;
             try
             {
-                response = await http.SendAsync(request, ct);
+                response = await http.SendAsync(message, ct);
             }
             catch (HttpRequestException ex) when (attempt < settings.MaxRetries)
             {
                 logger.LogWarning(ex, "{Provider} request failed (attempt {Attempt}); retrying", settings.Provider, attempt + 1);
-                await Delay(Backoff(attempt, null, maxDelay), ct);
+                await Delay(Backoff(attempt++, null, maxDelay), ct);
                 continue;
             }
             catch (HttpRequestException ex)
@@ -267,16 +299,36 @@ public sealed class OpenAiCompatibleChatModel(HttpClient http, OpenAiCompatibleS
                 var text = await response.Content.ReadAsStringAsync(ct);
                 if (response.IsSuccessStatusCode)
                 {
-                    return JsonDocument.Parse(text);
+                    return (JsonDocument.Parse(text), modelId, skipped);
                 }
 
                 var status = (int)response.StatusCode;
+                if (status is 429 or 503)
+                {
+                    _overloadedUntil[modelId] = Clock() + OverloadCooldown;
+                    if (index < models.Count - 1)
+                    {
+                        // Capacity is per model: the next one usually answers at once, so don't back off first.
+                        logger.LogWarning("{Model} returned {Status}; falling back to {Next}", modelId, status, models[index + 1]);
+                        if (!skipped.Contains(modelId))
+                        {
+                            skipped.Add(modelId);
+                        }
+
+                        index++;
+                        continue;
+                    }
+                }
+
                 var retryable = status is 408 or 429 or >= 500;
                 if (retryable && attempt < settings.MaxRetries)
                 {
                     var delay = Backoff(attempt, response.Headers.RetryAfter, maxDelay);
                     logger.LogWarning("{Provider} returned {Status}; retrying in {Delay}s (attempt {Attempt})", settings.Provider, status, delay.TotalSeconds, attempt + 1);
                     await Delay(delay, ct);
+                    attempt++;
+                    index = 0;
+                    models = ModelsInPreferenceOrder();
                     continue;
                 }
 
@@ -287,7 +339,7 @@ public sealed class OpenAiCompatibleChatModel(HttpClient http, OpenAiCompatibleS
                     status = 401;
                 }
 
-                throw new ModelProviderException(settings.Provider, status, Describe((HttpStatusCode)status, detail));
+                throw new ModelProviderException(settings.Provider, status, Describe((HttpStatusCode)status, detail, modelId));
             }
         }
     }
@@ -318,13 +370,13 @@ public sealed class OpenAiCompatibleChatModel(HttpClient http, OpenAiCompatibleS
         return null;
     }
 
-    private string Describe(HttpStatusCode status, string? detail)
+    private string Describe(HttpStatusCode status, string? detail, string modelId)
     {
         var prefix = status switch
         {
             HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden => $"{settings.Provider} rejected the API key",
             HttpStatusCode.TooManyRequests => $"{settings.Provider} rate limit or free-tier quota exceeded",
-            HttpStatusCode.NotFound => $"{settings.Provider} does not know model '{settings.Model}'",
+            HttpStatusCode.NotFound => $"{settings.Provider} does not know model '{modelId}'",
             _ => $"{settings.Provider} returned HTTP {(int)status}",
         };
         return detail is null ? prefix + "." : $"{prefix}: {Truncate(detail, 400)}";

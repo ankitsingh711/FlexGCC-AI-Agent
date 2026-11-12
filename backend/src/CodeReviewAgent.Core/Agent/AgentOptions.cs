@@ -11,6 +11,12 @@ public sealed class AgentOptions
     /// <summary>Model id. Empty (or a claude-* id with a non-Anthropic provider) means the provider's default model.</summary>
     public string Model { get; set; } = "claude-opus-5-5";
 
+    /// <summary>
+    /// Models to try, in order, when the main model is overloaded (503) or rate-limited (429). Null means the provider's
+    /// defaults (for Gemini: gemini-3.6-flash, then gemini-3.5-flash-lite); an empty list turns fallback off.
+    /// </summary>
+    public string[]? FallbackModels { get; set; }
+
     /// <summary>Override the provider's base URL (required for openai-compatible, e.g. a local Ollama at http://localhost:11434/v1/).</summary>
     public string? BaseUrl { get; set; }
 
