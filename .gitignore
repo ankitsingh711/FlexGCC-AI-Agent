@@ -1,0 +1,24 @@
+# .NET
+bin/
+obj/
+*.user
+.vs/
+TestResults/
+
+# Local database
+*.db
+*.db-shm
+*.db-wal
+
+# Frontend
+node_modules/
+frontend/dist/
+# Built UI is produced by `npm run build` into the API's wwwroot
+backend/src/CodeReviewAgent.Api/wwwroot/
+
+# Env / secrets
+.env
+.env.*
+appsettings.*.local.json
+
+.DS_Store

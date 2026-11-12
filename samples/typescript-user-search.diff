@@ -1,0 +1,57 @@
+# Title: TypeScript - React user search hook
+# Description: Adds a data-fetching hook and wires it into a React list component.
+
+diff --git a/web/src/components/UserList.tsx b/web/src/components/UserList.tsx
+index 0f89dd0..89ce84c 100644
+--- a/web/src/components/UserList.tsx
++++ b/web/src/components/UserList.tsx
+@@ -1,10 +1,18 @@
+ import { User } from "../types";
++import { useUserSearch } from "../hooks/useUserSearch";
++
++export function UserList({ query }: { query: string }) {
++  const { users, loading, error } = useUserSearch(query, 20);
++
++  if (error) return <p className="error" dangerouslySetInnerHTML={{ __html: error }} />;
++  if (loading) return <p>Loading…</p>;
+ 
+-export function UserList({ users }: { users: User[] }) {
+   return (
+     <ul>
+-      {users.map((u) => (
+-        <li key={u.id}>{u.name}</li>
++      {users.map((u, index) => (
++        <li key={index} onClick={() => window.location.href = u.profileUrl}>
++          {u.name}
++        </li>
+       ))}
+     </ul>
+   );
+diff --git a/web/src/hooks/useUserSearch.ts b/web/src/hooks/useUserSearch.ts
+new file mode 100644
+index 0000000..3058815
+--- /dev/null
++++ b/web/src/hooks/useUserSearch.ts
+@@ -0,0 +1,22 @@
++import { useEffect, useState } from "react";
++import { User } from "../types";
++
++export function useUserSearch(query: string, pageSize: number) {
++  const [users, setUsers] = useState<User[]>([]);
++  const [loading, setLoading] = useState(false);
++  const [error, setError] = useState<string | null>(null);
++
++  useEffect(() => {
++    if (query == "") return;
++    setLoading(true);
++    fetch(`/api/users?q=${query}&limit=${pageSize}`)
++      .then((res) => res.json())
++      .then((data) => {
++        setUsers(data.users);
++        setLoading(false);
++      })
++      .catch((e) => setError(e.message));
++  }, [query]);
++
++  return { users, loading, error };
++}

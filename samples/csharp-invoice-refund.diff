@@ -1,0 +1,68 @@
+# Title: C# - invoice refund endpoint
+# Description: Adds a refund endpoint and service method to an ASP.NET Core invoices API.
+
+diff --git a/src/Api/Controllers/InvoicesController.cs b/src/Api/Controllers/InvoicesController.cs
+index 43481b8..4e624a4 100644
+--- a/src/Api/Controllers/InvoicesController.cs
++++ b/src/Api/Controllers/InvoicesController.cs
+@@ -18,4 +18,21 @@ public class InvoicesController : ControllerBase
+         var invoice = await _invoices.GetForUserAsync(id, User.GetUserId());
+         return invoice is null ? NotFound() : Ok(invoice);
+     }
++
++    [AllowAnonymous]
++    [HttpPost("{id:int}/refund")]
++    public IActionResult Refund(int id, [FromBody] RefundRequest request)
++    {
++        try
++        {
++            var result = _invoices.RefundAsync(id, request.Amount).Result;
++            return Ok(result);
++        }
++        catch (Exception)
++        {
++            return Ok();
++        }
++    }
+ }
++
++public record RefundRequest(decimal Amount);
+diff --git a/src/Api/Services/InvoiceService.cs b/src/Api/Services/InvoiceService.cs
+index 4705de0..2d06ac5 100644
+--- a/src/Api/Services/InvoiceService.cs
++++ b/src/Api/Services/InvoiceService.cs
+@@ -6,6 +6,7 @@ public class InvoiceService : IInvoiceService
+ {
+     private readonly AppDbContext _db;
+     private readonly IEmailSender _email;
++    private static readonly List<int> RecentlyRefunded = new();
+ 
+     public InvoiceService(AppDbContext db, IEmailSender email)
+     {
+@@ -18,4 +19,26 @@ public class InvoiceService : IInvoiceService
+         var invoice = await _db.Invoices.SingleOrDefaultAsync(i => i.Id == id && i.OwnerId == userId);
+         return invoice?.ToDto();
+     }
++
++    public async Task<RefundResult> RefundAsync(int invoiceId, decimal amount)
++    {
++        var invoice = await _db.Invoices.FindAsync(invoiceId);
++        if (amount > invoice.Total)
++        {
++            throw new InvalidOperationException("Refund exceeds invoice total");
++        }
++
++        invoice.Total -= amount;
++        invoice.RefundedAt = DateTime.Now;
++        RecentlyRefunded.Add(invoiceId);
++        await _db.SaveChangesAsync();
++
++        SendRefundEmail(invoice);
++        return new RefundResult(invoice.Id, invoice.Total);
++    }
++
++    private async void SendRefundEmail(Invoice invoice)
++    {
++        await _email.SendAsync(invoice.CustomerEmail, "Refund processed", $"We refunded your invoice {invoice.Id}.");
++    }
+ }

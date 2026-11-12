@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CodeReviewAgent.Api/CodeReviewAgent.Api.csproj" />
+    <Project Path="src/CodeReviewAgent.Cli/CodeReviewAgent.Cli.csproj" />
+    <Project Path="src/CodeReviewAgent.Core/CodeReviewAgent.Core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CodeReviewAgent.Tests/CodeReviewAgent.Tests.csproj" />
+  </Folder>
+</Solution>

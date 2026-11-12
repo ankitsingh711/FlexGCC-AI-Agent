@@ -1,0 +1,47 @@
+# Title: Python - bulk discounts and order search
+# Description: Adds tiered bulk discounts and a customer search query to a small Python order service.
+
+diff --git a/app/orders_repo.py b/app/orders_repo.py
+index ed20d0f..3c09b21 100644
+--- a/app/orders_repo.py
++++ b/app/orders_repo.py
+@@ -8,3 +8,10 @@ class OrdersRepository:
+     def get_order(self, order_id: int):
+         cur = self.conn.execute("SELECT id, customer, total FROM orders WHERE id = ?", (order_id,))
+         return cur.fetchone()
++
++    def search_orders(self, customer_name: str, sort_by: str = "id"):
++        query = f"SELECT id, customer, total FROM orders WHERE customer LIKE '%{customer_name}%' ORDER BY {sort_by}"
++        return self.conn.execute(query).fetchall()
++
++    def save_total(self, order_id: int, total: float):
++        self.conn.execute("UPDATE orders SET total = ? WHERE id = ?", (total, order_id))
+diff --git a/app/pricing.py b/app/pricing.py
+index 58af822..b391c1e 100644
+--- a/app/pricing.py
++++ b/app/pricing.py
+@@ -17,3 +17,24 @@ def apply_discount(total, percent):
+     if percent < 0 or percent > 100:
+         raise ValueError("percent must be between 0 and 100")
+     return round(total * (1 - percent / 100), 2)
++
++
++def bulk_discount_percent(items, tiers=[(10, 5), (50, 10), (100, 15)]):
++    """Return the discount percent for the total quantity ordered."""
++    qty = sum(i.quantity for i in items)
++    tiers.sort(reverse=True)
++    for threshold, percent in tiers:
++        if qty > threshold:
++            return percent
++    return 0
++
++
++def average_unit_price(items):
++    return subtotal(items) / sum(i.quantity for i in items)
++
++
++def price_order(items, coupon_percent=0):
++    total = subtotal(items)
++    total = apply_discount(total, bulk_discount_percent(items))
++    total = apply_discount(total, coupon_percent)
++    return total
